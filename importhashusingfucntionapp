@@ -1,0 +1,132 @@
+using namespace System.Net
+
+# Input bindings are passed in via param block.
+param($Request)
+
+$convertedFromJson = $Request.RawBody | Convertfrom-Json
+
+
+$VerbosePreference = "SilentlyContinue"
+$Workplace_Intune_ID = "Enter the client App"
+$ClientSec = "Enter your client app secret here"
+$Tenant = "enter your tenant ID here
+
+ Function Write-Log {
+    [CmdletBinding()]
+    Param
+    (       
+      
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [ValidateSet("Info", "Warning", "Error", "Success","Flag")]
+        $Level = "Info"
+    )
+
+    $FormattedDate = Get-Date -Format "[yyyy-MM-dd][HH:mm:ss]"
+    $OutString = "$FormattedDate - $Level - $Message"
+    
+
+    switch ($Level) {
+        "Info" { Write-Host $OutString; break }
+        "Warning" { Write-Host $OutString -ForegroundColor Yellow; break }
+        "Error" { Write-Host $OutString -ForegroundColor Red; break }
+        "Success" { write-host $OutString -ForegroundColor Green; break }
+        "Flag" { write-host $OutString -ForegroundColor Cyan; break }
+         Default { Write-Host $OutString; break }
+    }
+}
+
+ Function Get-AccessToken {
+    $headers = @{
+        Accept         = 'application/json;odata=nometadata'
+        'Content-Type' = 'application/x-www-form-urlencoded'
+    }
+
+   $TenantID = "'$Tenant'"
+   $Scope = "https://graph.microsoft.com"
+    $hash = @{
+        client_id          = "$Workplace_Intune_ID"
+        scope              = "$Scope"
+        client_credentials = "$ClientSec"
+        grant_type         = "client_credentials"
+        resource           = "$Scope"
+        redirect_uri       = "http://localhost/redirect/"
+    }
+
+    $body = "client_id" + "=" + $hash.client_id + "&" + "scope" + "=" + $hash.scope + "&" + "client_secret" + "=" + $hash.client_credentials + "&" + "grant_type" + "=" + $hash.grant_type + "&" + "resource" + "=" + $hash.resource + "&" + "redirect_uri" + "=" + $hash.redirect_uri
+
+    $URL = "https://login.microsoftonline.com/$Tenant/oauth2/token"
+    try{
+    Invoke-RestMethod -Uri $URL -Method POST -Headers $headers -Body $body
+    Write-Verbose "Received Access Token." -verbose
+    }
+    catch{
+    Write-Error -Message "$_"
+    }
+}
+
+$Token = Get-AccessToken
+
+
+
+$authHeader = @{
+        'Content-Type'  = 'application/json'
+        'Authorization' = "Bearer " + $Token.access_token
+        'ExpiresOn'     = $Token.expires_on
+ 
+    }
+
+$GraphVersion = "beta"
+$GraphResource = "deviceManagement/importedWindowsAutopilotDeviceIdentities"
+$GraphURI = "https://graph.microsoft.com/$($GraphVersion)/$($GraphResource)"
+
+
+$AutopilotDeviceIdentity = [ordered]@{
+        '@odata.type' = '#microsoft.graph.importedWindowsAutopilotDeviceIdentity'
+        'orderIdentifier' = $convertedFromJson.groupTag
+        'serialNumber' = $convertedFromJson.serialNumber
+        'productKey' = if ($convertedFromJson.productKey) { "$($convertedFromJson.productKey)" } else { "" }
+        'hardwareIdentifier' = "$($convertedFromJson.hardwareIdentifier)"
+        'assignedUserPrincipalName' = ""
+        'state' = @{
+            '@odata.type' = 'microsoft.graph.importedWindowsAutopilotDeviceIdentityState'
+            'deviceImportStatus' = 'pending'
+            'deviceRegistrationId' = ''
+            'deviceErrorCode' = 0
+            'deviceErrorName' = ''
+        }
+    }
+    
+    $json = $AutopilotDeviceIdentity | ConvertTo-Json 
+   
+   $AddingAutopilotDeviceEntry = Invoke-RestMethod -Uri $GraphURI -Headers $authHeader -Method POST -Body $json
+   $ImportedID = ($AddingAutopilotDeviceEntry).id
+
+Do {
+    $GetImportedStatusURL = "https://graph.microsoft.com/v1.0/deviceManagement/importedWindowsAutopilotDeviceIdentities/$ImportedID"
+    $Status = (Invoke-RestMethod -Uri $GetImportedStatusURL -Headers $authHeader -Method Get).state.deviceImportStatus
+
+   if($Status -eq "failed"){
+    write-host "import Failed" -ForegroundColor Red
+    exit
+    }
+
+   if($Status -eq "error"){
+    write-host "import error out: check out logs for more info" -ForegroundColor Red
+    exit
+    }
+
+}
+until(($Status -eq "completed") -or ($Status -eq "unknown"))
+write-host "Device import completed and the serial number is:  $($AddingAutopilotDeviceEntry.serialNumber)"
+
+
+
+
+
+# Associate values to output bindings by calling 'Push-OutputBinding'.
+Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+    StatusCode = [HttpStatusCode]::OK
+    Body = $Status
+})
